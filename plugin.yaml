@@ -1,0 +1,31 @@
+schema: mcpg.dev/plugin/v1
+id: dev.mcpg.credential.oauth-id-jag
+name: OAuth Cross-App Access (ID-JAG) Issuer
+license: BUSL-1.1
+description: |
+  Outbound OAuth 2.0 Cross-App Access issuer. Runs the ID-JAG two-hop
+  flow per provider: (1) exchange the *caller's* subject token at the
+  enterprise IdP for an ID Assertion Grant (RFC 8693 token-exchange,
+  `requested_token_type = …:id-jag`, scoped to the upstream Resource
+  Authorization Server via `audience`), then (2) redeem that assertion at
+  the upstream AS token endpoint (RFC 7523 `jwt-bearer`) for the upstream
+  access token. That upstream access token is the credential.
+
+  The caller's subject token is read from the resolved identity's
+  `attributes["subject_token"]` (federation's `oauth_impersonation` mode
+  populates it from the inbound bearer); `subject_token_type` may be
+  supplied the same way or defaults per provider. Operators declare N
+  named providers (IdP exchange endpoint + client + audience/resource/
+  scopes + upstream-AS redeem endpoint + optional redeem client).
+  Bindings + federations reference an issued token via
+  `cred://dev.mcpg.credential.oauth-id-jag/<provider>`.
+
+  No in-plugin token cache: tokens are per-caller (each subject token
+  yields a distinct exchange), so caching is left to the host credential
+  cache, which is keyed per (identity, plugin, target). A provider-keyed
+  in-plugin cache would leak one caller's token to another.
+class: credential_issuer
+runtime: native-cdylib-v1
+protocol_version: "1.0"
+required_capabilities:
+  - network_outbound
