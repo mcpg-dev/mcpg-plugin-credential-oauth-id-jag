@@ -13,10 +13,13 @@ description: |
 
   The caller's subject token is read from the resolved identity's
   `attributes["subject_token"]` (federation's `oauth_impersonation` mode
-  populates it from the inbound bearer); `subject_token_type` may be
-  supplied the same way or defaults per provider. Operators declare N
+  populates it from the inbound bearer); `subject_token_type` is set per
+  provider and may be overridden the same way. Operators declare N
   named providers (IdP exchange endpoint + client + audience/resource/
-  scopes + upstream-AS redeem endpoint + optional redeem client).
+  scopes + upstream-AS redeem endpoint + optional redeem client). Each
+  hop authenticates with client_secret_post, client_secret_basic or
+  private_key_jwt, and both endpoints must be https and public unless
+  the provider opts out.
   Bindings + federations reference an issued token via
   `cred://dev.mcpg.credential.oauth-id-jag/<provider>`.
 
