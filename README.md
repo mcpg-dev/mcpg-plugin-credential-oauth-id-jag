@@ -148,9 +148,12 @@ For `private_key_jwt`:
 
 - `private_key` is a PKCS#8 PEM (PKCS#1 also works for RSA). Source it with
   `${secret.NAME}` or `${env.X}`; literal `\n` escapes are accepted.
-- `signing_alg` is one of `RS256` (default), `RS384`, `RS512`, `PS256`,
-  `PS384`, `PS512`, `ES256`, `ES384` or `EdDSA`. The key must match it; a
-  mismatch refuses to load.
+- `signing_alg` is one of `RS256`, `RS384`, `RS512`, `PS256`, `PS384`,
+  `PS512`, `ES256`, `ES384` or `EdDSA`. Unset, it is the one the key type
+  implies: `RS256` for RSA, `ES256` for P-256, `ES384` for P-384 and `EdDSA`
+  for Ed25519. The gateway's `login` block makes the same choice, so a login
+  key shared with it needs no `signing_alg` here. A `signing_alg` the key
+  cannot sign with, or a key of another type, refuses to load.
 - `key_id` sets the JWT `kid` header.
 - `assertion_audience` is `token_endpoint` (default, the URL the assertion is
   posted to, which Okta requires) or `issuer`. For hop 1, `issuer` needs

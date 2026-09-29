@@ -127,7 +127,8 @@ pub struct IdJagTargetTemplate {
     #[serde(default)]
     pub key_id: Option<String>,
 
-    /// Hop-1 client assertion algorithm. Default RS256.
+    /// Hop-1 client assertion algorithm. Default: the one the key type
+    /// implies (RSA: RS256, P-256: ES256, P-384: ES384, Ed25519: EdDSA).
     #[serde(default)]
     pub signing_alg: Option<SigningAlg>,
 
@@ -185,7 +186,8 @@ pub struct IdJagTargetTemplate {
     #[serde(default)]
     pub redeem_key_id: Option<String>,
 
-    /// Hop-2 client assertion algorithm. Default RS256.
+    /// Hop-2 client assertion algorithm. Default: the one the key type
+    /// implies, as for hop 1.
     #[serde(default)]
     pub redeem_signing_alg: Option<SigningAlg>,
 
@@ -370,7 +372,8 @@ pub struct IdJagProviderConfig {
     #[serde(default)]
     pub key_id: Option<String>,
 
-    /// Hop-1 client assertion algorithm. Default RS256.
+    /// Hop-1 client assertion algorithm. Default: the one the key type
+    /// implies (RSA: RS256, P-256: ES256, P-384: ES384, Ed25519: EdDSA).
     #[serde(default)]
     pub signing_alg: Option<SigningAlg>,
 
@@ -430,7 +433,8 @@ pub struct IdJagProviderConfig {
     #[serde(default)]
     pub redeem_key_id: Option<String>,
 
-    /// Hop-2 client assertion algorithm. Default RS256.
+    /// Hop-2 client assertion algorithm. Default: the one the key type
+    /// implies, as for hop 1.
     #[serde(default)]
     pub redeem_signing_alg: Option<SigningAlg>,
 
@@ -648,7 +652,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const RSA_PRIV: &str = include_str!("../tests/fixtures/rsa_priv.pem");
+    const RSA_PRIV: &str = include_str!("testdata/rsa_priv.pem");
+    const EC_PRIV: &str = include_str!("testdata/ec_priv.pem");
+    const EC_P384_PRIV: &str = include_str!("testdata/ec_p384_priv.pem");
+    const ED_PRIV: &str = include_str!("testdata/ed25519_priv.pem");
 
     fn minimal() -> serde_json::Value {
         json!({
@@ -1036,6 +1043,62 @@ mod tests {
         }
         v["providers"]["drive"]["idp_issuer"] = json!("https://idp.example.com");
         assert!(IdJagConfig::parse(&v.to_string()).is_ok());
+    }
+
+    #[test]
+    fn signing_alg_defaults_to_the_key_type_on_both_hops() {
+        for (hop_one, hop_two) in [
+            (EC_PRIV, ED_PRIV),
+            (EC_P384_PRIV, RSA_PRIV),
+            (ED_PRIV, EC_PRIV),
+        ] {
+            let mut v = minimal();
+            let drive = &mut v["providers"]["drive"];
+            drive["client_auth"] = json!("private_key_jwt");
+            drive["private_key"] = json!(hop_one);
+            drive["redeem_client_id"] = json!("mcpg-drive");
+            drive["redeem_client_auth"] = json!("private_key_jwt");
+            drive["redeem_private_key"] = json!(hop_two);
+            if let Err(err) = IdJagConfig::parse(&v.to_string()) {
+                panic!("{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn signing_alg_the_key_cannot_sign_is_refused() {
+        let mut v = template_only();
+        let template = &mut v["target_template"];
+        template["client_auth"] = json!("private_key_jwt");
+        template["private_key"] = json!(EC_PRIV);
+        assert!(IdJagConfig::parse(&v.to_string()).is_ok());
+        v["target_template"]["signing_alg"] = json!("ES384");
+        match parse_err(&v) {
+            ConfigError::ClientAuth { reason, .. } => {
+                assert!(
+                    reason.contains("private_key cannot sign ES384: expected a P-384 key"),
+                    "{reason}"
+                );
+                assert!(!reason.contains("BEGIN"), "{reason}");
+            }
+            other => panic!("unexpected: {other}"),
+        }
+
+        let mut v = minimal();
+        let drive = &mut v["providers"]["drive"];
+        drive["redeem_client_id"] = json!("mcpg-drive");
+        drive["redeem_client_auth"] = json!("private_key_jwt");
+        drive["redeem_private_key"] = json!(ED_PRIV);
+        drive["redeem_signing_alg"] = json!("RS256");
+        match parse_err(&v) {
+            ConfigError::ClientAuth { reason, .. } => {
+                assert!(
+                    reason.contains("redeem_private_key cannot sign RS256"),
+                    "{reason}"
+                );
+            }
+            other => panic!("unexpected: {other}"),
+        }
     }
 
     #[test]

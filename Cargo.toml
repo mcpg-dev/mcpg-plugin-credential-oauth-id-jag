@@ -1,6 +1,6 @@
 [package]
 name = "mcpg-plugin-credential-oauth-id-jag"
-version = "0.1.0-alpha.41"
+version = "0.1.0-alpha.42"
 license = "BUSL-1.1"
 edition = "2024"
 description = "OAuth 2.0 Cross-App Access (ID-JAG) credential_issuer plugin for MCPG (RFC 8693 exchange + RFC 7523 redeem)"

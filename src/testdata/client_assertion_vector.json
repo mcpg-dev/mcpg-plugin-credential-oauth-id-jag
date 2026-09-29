@@ -1,0 +1,29 @@
+{
+  "description": "Client authentication at an IdP token endpoint, as both the oauth-id-jag plugin and the gateway's login client (trusted_idps[].login) perform it; at an Okta org the two are one OIDC app. For every signer and every audience rule, the form fields, the assertion header and its claims must be exactly these. The keys are the PEM files beside this one.",
+  "client_id": "agent-1",
+  "key_id": "kid-1",
+  "token_endpoint": "https://idp.example.com/oauth2/v1/token",
+  "issuer": "https://idp.example.com",
+  "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+  "lifetime_secs": 120,
+  "header_typ": "JWT",
+  "form_fields": ["client_id", "client_assertion_type", "client_assertion"],
+  "signers": [
+    { "alg": "RS256", "private_key": "rsa_priv.pem", "public_key": "rsa_pub.pem" },
+    { "alg": "PS256", "private_key": "rsa_priv.pem", "public_key": "rsa_pub.pem" },
+    { "alg": "ES256", "private_key": "ec_priv.pem", "public_key": "ec_pub.pem" },
+    { "alg": "EdDSA", "private_key": "ed25519_priv.pem", "public_key": "ed25519_pub.pem" }
+  ],
+  "audiences": [
+    {
+      "assertion_audience": "token_endpoint",
+      "aud": "https://idp.example.com/oauth2/v1/token"
+    },
+    { "assertion_audience": "issuer", "aud": "https://idp.example.com" }
+  ],
+  "client_secret_basic": {
+    "client_id": "agent:1",
+    "client_secret": "s3cr+t/=s3cr+t/=",
+    "authorization": "Basic YWdlbnQlM0ExOnMzY3IlMkJ0JTJGJTNEczNjciUyQnQlMkYlM0Q="
+  }
+}

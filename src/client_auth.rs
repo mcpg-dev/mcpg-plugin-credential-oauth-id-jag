@@ -50,9 +50,8 @@ pub enum AssertionAudience {
 }
 
 /// JWS algorithm of a `private_key_jwt` client assertion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SigningAlg {
-    #[default]
     #[serde(rename = "RS256")]
     Rs256,
     #[serde(rename = "RS384")]
@@ -74,6 +73,10 @@ pub enum SigningAlg {
 }
 
 impl SigningAlg {
+    /// The algorithm each key type implies, one per type: RSA, P-256, P-384
+    /// and Ed25519. A key signs with at most one of them.
+    const KEY_TYPE_DEFAULTS: [Self; 4] = [Self::Rs256, Self::Es256, Self::Es384, Self::EdDsa];
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Rs256 => "RS256",
@@ -111,6 +114,18 @@ impl SigningAlg {
             Self::EdDsa => EncodingKey::from_ed_pem(pem),
         }
     }
+
+    /// The private key this algorithm signs with.
+    fn key_type(self) -> &'static str {
+        match self {
+            Self::Rs256 | Self::Rs384 | Self::Rs512 | Self::Ps256 | Self::Ps384 | Self::Ps512 => {
+                "an RSA key in PKCS#8 or PKCS#1 PEM"
+            }
+            Self::Es256 => "a P-256 key in PKCS#8 PEM",
+            Self::Es384 => "a P-384 key in PKCS#8 PEM",
+            Self::EdDsa => "an Ed25519 key in PKCS#8 PEM",
+        }
+    }
 }
 
 /// One token endpoint's client-authentication settings, as configured.
@@ -122,6 +137,7 @@ pub(crate) struct ClientAuthSettings<'a> {
     pub client_secret: Option<&'a str>,
     pub private_key: Option<&'a str>,
     pub key_id: Option<&'a str>,
+    /// Unset: the algorithm the key type implies.
     pub signing_alg: Option<SigningAlg>,
     pub assertion_audience: Option<AssertionAudience>,
     /// Whether an issuer identifier exists for `assertion_audience: issuer`.
@@ -251,23 +267,47 @@ impl ClientAuth {
                         settings.issuer_setting
                     ));
                 }
-                let alg = settings.signing_alg.unwrap_or_default();
-                let key = alg.load_key(normalize_pem(pem).as_bytes()).map_err(|e| {
-                    format!(
-                        "{p}private_key is not a PKCS#8 or PKCS#1 PEM private key for {}: {e}",
-                        alg.as_str()
-                    )
-                })?;
-                let signer = AssertionSigner {
-                    client_id: id.to_owned(),
-                    alg: alg.algorithm(),
-                    key,
-                    key_id: present(settings.key_id).map(str::to_owned),
-                    audience,
+                let pem = normalize_pem(pem);
+                // A key counts for an algorithm only once it has signed: an EC
+                // key loads for ES256 and ES384 alike but signs on one curve.
+                // `Err(None)`: the key does not load. A load error can quote
+                // bytes of the PEM, so only a signing error is kept.
+                let signer_for = |alg: SigningAlg| -> Result<AssertionSigner, Option<String>> {
+                    let signer = AssertionSigner {
+                        client_id: id.to_owned(),
+                        alg: alg.algorithm(),
+                        key: alg.load_key(pem.as_bytes()).map_err(|_| None)?,
+                        key_id: present(settings.key_id).map(str::to_owned),
+                        audience,
+                    };
+                    signer
+                        .encode("urn:mcpg:key-check", 0)
+                        .map_err(|e| Some(e.to_string()))?;
+                    Ok(signer)
                 };
-                signer
-                    .sign("urn:mcpg:key-check")
-                    .map_err(|e| format!("{p}private_key cannot sign {}: {e}", alg.as_str()))?;
+                let signer = match settings.signing_alg {
+                    Some(alg) => signer_for(alg).map_err(|cause| {
+                        let reason = format!(
+                            "{p}private_key cannot sign {}: expected {}",
+                            alg.as_str(),
+                            alg.key_type()
+                        );
+                        match cause {
+                            Some(cause) => format!("{reason} ({cause})"),
+                            None => reason,
+                        }
+                    })?,
+                    None => SigningAlg::KEY_TYPE_DEFAULTS
+                        .into_iter()
+                        .find_map(|alg| signer_for(alg).ok())
+                        .ok_or_else(|| {
+                            format!(
+                                "{p}private_key is not a usable PEM private key: expected an RSA \
+                                 (RS256), P-256 (ES256), P-384 (ES384) or Ed25519 (EdDSA) key in \
+                                 PKCS#8 PEM, or an RSA key in PKCS#1 PEM"
+                            )
+                        })?,
+                };
                 Ok(Self::PrivateKeyJwt(Box::new(signer)))
             }
         }
@@ -327,18 +367,23 @@ impl AssertionSigner {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| "system clock is before the Unix epoch".to_owned())?
             .as_secs();
+        self.encode(audience, now)
+            .map_err(|e| format!("client assertion signing failed: {e}"))
+    }
+
+    /// The assertion issued at `iat`, in Unix seconds.
+    fn encode(&self, audience: &str, iat: u64) -> jsonwebtoken::errors::Result<String> {
         let claims = AssertionClaims {
             iss: &self.client_id,
             sub: &self.client_id,
             aud: audience,
             jti: uuid::Uuid::new_v4().to_string(),
-            iat: now,
-            exp: now + ASSERTION_LIFETIME_SECS,
+            iat,
+            exp: iat + ASSERTION_LIFETIME_SECS,
         };
         let mut header = Header::new(self.alg);
         header.kid = self.key_id.clone();
         jsonwebtoken::encode(&header, &claims, &self.key)
-            .map_err(|e| format!("client assertion signing failed: {e}"))
     }
 }
 
@@ -348,12 +393,14 @@ mod tests {
     use jsonwebtoken::{DecodingKey, Validation};
     use serde_json::Value;
 
-    const RSA_PRIV: &str = include_str!("../tests/fixtures/rsa_priv.pem");
-    const RSA_PUB: &str = include_str!("../tests/fixtures/rsa_pub.pem");
-    const EC_PRIV: &str = include_str!("../tests/fixtures/ec_priv.pem");
-    const EC_PUB: &str = include_str!("../tests/fixtures/ec_pub.pem");
-    const ED_PRIV: &str = include_str!("../tests/fixtures/ed25519_priv.pem");
-    const ED_PUB: &str = include_str!("../tests/fixtures/ed25519_pub.pem");
+    const RSA_PRIV: &str = include_str!("testdata/rsa_priv.pem");
+    const RSA_PUB: &str = include_str!("testdata/rsa_pub.pem");
+    const EC_PRIV: &str = include_str!("testdata/ec_priv.pem");
+    const EC_PUB: &str = include_str!("testdata/ec_pub.pem");
+    const EC_P384_PRIV: &str = include_str!("testdata/ec_p384_priv.pem");
+    const EC_P384_PUB: &str = include_str!("testdata/ec_p384_pub.pem");
+    const ED_PRIV: &str = include_str!("testdata/ed25519_priv.pem");
+    const ED_PUB: &str = include_str!("testdata/ed25519_pub.pem");
 
     const TOKEN_URL: &str = "https://idp.example.com/oauth2/v1/token";
 
@@ -372,12 +419,18 @@ mod tests {
         }
     }
 
-    fn jwt_settings<'a>(pem: &'a str, alg: SigningAlg) -> ClientAuthSettings<'a> {
+    fn key_settings(pem: &str) -> ClientAuthSettings<'_> {
         ClientAuthSettings {
             private_key: Some(pem),
-            signing_alg: Some(alg),
             key_id: Some("kid-1"),
             ..settings(Some(ClientAuthMethod::PrivateKeyJwt))
+        }
+    }
+
+    fn jwt_settings(pem: &str, alg: SigningAlg) -> ClientAuthSettings<'_> {
+        ClientAuthSettings {
+            signing_alg: Some(alg),
+            ..key_settings(pem)
         }
     }
 
@@ -517,9 +570,62 @@ mod tests {
     }
 
     #[test]
+    fn private_key_jwt_signs_with_the_algorithm_the_key_type_implies() {
+        for (pem, public, alg) in [
+            (
+                RSA_PRIV,
+                DecodingKey::from_rsa_pem(RSA_PUB.as_bytes()),
+                Algorithm::RS256,
+            ),
+            (
+                EC_PRIV,
+                DecodingKey::from_ec_pem(EC_PUB.as_bytes()),
+                Algorithm::ES256,
+            ),
+            (
+                EC_P384_PRIV,
+                DecodingKey::from_ec_pem(EC_P384_PUB.as_bytes()),
+                Algorithm::ES384,
+            ),
+            (
+                ED_PRIV,
+                DecodingKey::from_ed_pem(ED_PUB.as_bytes()),
+                Algorithm::EdDSA,
+            ),
+        ] {
+            let auth =
+                ClientAuth::compile(&key_settings(pem)).unwrap_or_else(|e| panic!("{alg:?}: {e}"));
+            let (_, form) = form_of(&auth, None);
+            let assertion = field(&form, "client_assertion").unwrap();
+            assert_eq!(jsonwebtoken::decode_header(assertion).unwrap().alg, alg);
+            assert_assertion_claims(&decode(assertion, alg, &public.unwrap(), TOKEN_URL));
+        }
+    }
+
+    #[test]
+    fn an_explicit_signing_alg_wins_over_the_key_type() {
+        let public = DecodingKey::from_rsa_pem(RSA_PUB.as_bytes()).unwrap();
+        for alg in [SigningAlg::Ps256, SigningAlg::Rs512] {
+            let auth = ClientAuth::compile(&jwt_settings(RSA_PRIV, alg)).unwrap();
+            let (_, form) = form_of(&auth, None);
+            let assertion = field(&form, "client_assertion").unwrap();
+            assert_eq!(
+                jsonwebtoken::decode_header(assertion).unwrap().alg,
+                alg.algorithm()
+            );
+            decode(assertion, alg.algorithm(), &public, TOKEN_URL);
+        }
+    }
+
+    #[test]
     fn escaped_newlines_from_an_env_var_are_accepted() {
         let escaped = RSA_PRIV.trim().replace('\n', "\\n");
         assert!(ClientAuth::compile(&jwt_settings(&escaped, SigningAlg::Rs256)).is_ok());
+        let escaped = EC_PRIV.trim().replace('\n', "\\n");
+        let auth = ClientAuth::compile(&key_settings(&escaped)).unwrap();
+        let (_, form) = form_of(&auth, None);
+        let header = jsonwebtoken::decode_header(field(&form, "client_assertion").unwrap());
+        assert_eq!(header.unwrap().alg, Algorithm::ES256);
     }
 
     #[test]
@@ -553,9 +659,35 @@ mod tests {
                 },
                 "requires idp_issuer",
             ),
-            (jwt_settings("not a pem", SigningAlg::Rs256), "PEM"),
-            (jwt_settings(EC_PRIV, SigningAlg::Rs256), "PEM"),
-            (jwt_settings(RSA_PRIV, SigningAlg::Es256), "PEM"),
+            (key_settings("not a pem"), "is not a usable PEM private key"),
+            (
+                jwt_settings("not a pem", SigningAlg::Rs256),
+                "cannot sign RS256: expected an RSA key",
+            ),
+            (
+                jwt_settings(EC_PRIV, SigningAlg::Rs256),
+                "cannot sign RS256: expected an RSA key",
+            ),
+            (
+                jwt_settings(RSA_PRIV, SigningAlg::Es256),
+                "cannot sign ES256: expected a P-256 key",
+            ),
+            (
+                jwt_settings(EC_P384_PRIV, SigningAlg::Es256),
+                "cannot sign ES256: expected a P-256 key",
+            ),
+            (
+                jwt_settings(EC_PRIV, SigningAlg::Es384),
+                "cannot sign ES384: expected a P-384 key",
+            ),
+            (
+                jwt_settings(ED_PRIV, SigningAlg::Ps256),
+                "cannot sign PS256: expected an RSA key",
+            ),
+            (
+                jwt_settings(RSA_PRIV, SigningAlg::EdDsa),
+                "cannot sign EdDSA: expected an Ed25519 key",
+            ),
         ];
         for (settings, expected) in cases {
             let err = ClientAuth::compile(&settings).err().unwrap();
@@ -564,8 +696,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_key_that_loads_but_does_not_sign_keeps_the_signing_error() {
+        let expected = "private_key cannot sign ES256: expected a P-256 key in PKCS#8 PEM";
+        let refused = ClientAuth::compile(&jwt_settings(EC_P384_PRIV, SigningAlg::Es256))
+            .err()
+            .unwrap();
+        let cause = refused
+            .strip_prefix(expected)
+            .and_then(|rest| rest.strip_prefix(" ("))
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("no signing error in {refused:?}"));
+        assert!(!cause.is_empty() && !cause.contains("BEGIN"), "{refused}");
+        let unloadable = ClientAuth::compile(&jwt_settings("not a pem", SigningAlg::Es256))
+            .err()
+            .unwrap();
+        assert_eq!(unloadable, expected);
+    }
+
     /// Held by this signer and by the gateway's login client alike.
-    const VECTOR: &str = include_str!("../tests/fixtures/client_assertion_vector.json");
+    const VECTOR: &str = include_str!("testdata/client_assertion_vector.json");
 
     fn fixture_pem(name: &str) -> &'static str {
         match name {

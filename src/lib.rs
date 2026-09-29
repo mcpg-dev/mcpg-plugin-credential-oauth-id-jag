@@ -865,12 +865,12 @@ mod tests {
     use wiremock::matchers::{any, body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-    const RSA_PRIV: &str = include_str!("../tests/fixtures/rsa_priv.pem");
-    const RSA_PUB: &str = include_str!("../tests/fixtures/rsa_pub.pem");
-    const EC_PRIV: &str = include_str!("../tests/fixtures/ec_priv.pem");
-    const EC_PUB: &str = include_str!("../tests/fixtures/ec_pub.pem");
-    const ED_PRIV: &str = include_str!("../tests/fixtures/ed25519_priv.pem");
-    const ED_PUB: &str = include_str!("../tests/fixtures/ed25519_pub.pem");
+    const RSA_PRIV: &str = include_str!("testdata/rsa_priv.pem");
+    const RSA_PUB: &str = include_str!("testdata/rsa_pub.pem");
+    const EC_PRIV: &str = include_str!("testdata/ec_priv.pem");
+    const EC_PUB: &str = include_str!("testdata/ec_pub.pem");
+    const ED_PRIV: &str = include_str!("testdata/ed25519_priv.pem");
+    const ED_PUB: &str = include_str!("testdata/ed25519_pub.pem");
 
     /// The endpoint override arrives from a document the upstream serves,
     /// and the client_id/client_secret are posted to it. Confining it to the
@@ -1300,6 +1300,46 @@ mod tests {
             &DecodingKey::from_ed_pem(ED_PUB.as_bytes()).unwrap(),
             "mcpg-drive",
             "https://drive-mcp.example.com",
+        );
+    }
+
+    #[tokio::test]
+    async fn private_key_jwt_without_signing_alg_signs_with_the_key_type() {
+        let server = MockServer::start().await;
+        Mock::given(path("/idp/token"))
+            .respond_with(id_jag_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/as/token"))
+            .respond_with(upstream_token_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut cfg = drive_config(&server.uri());
+        let drive = cfg["providers"]["drive"].as_object_mut().unwrap();
+        drive.remove("client_secret");
+        drive.insert("client_auth".into(), json!("private_key_jwt"));
+        drive.insert("private_key".into(), json!(EC_PRIV));
+        drive.insert("redeem_client_auth".into(), json!("private_key_jwt"));
+        drive.insert("redeem_private_key".into(), json!(ED_PRIV));
+        let plugin = OAuthIdJagPlugin::from_config_json(&cfg.to_string());
+        CredentialIssuer::issue(&plugin, &identity_with_subject("tok"), "drive", &json!({}))
+            .await
+            .unwrap();
+        assert_client_assertion(
+            &form_sent_to(&server, "/idp/token").await,
+            Algorithm::ES256,
+            &DecodingKey::from_ec_pem(EC_PUB.as_bytes()).unwrap(),
+            "mcpg",
+            &format!("{}/idp/token", server.uri()),
+        );
+        assert_client_assertion(
+            &form_sent_to(&server, "/as/token").await,
+            Algorithm::EdDSA,
+            &DecodingKey::from_ed_pem(ED_PUB.as_bytes()).unwrap(),
+            "mcpg-drive",
+            &format!("{}/as/token", server.uri()),
         );
     }
 
